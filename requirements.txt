@@ -1,17 +1,25 @@
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-python-multipart==0.0.9
-pydantic==2.7.1
-
-# LangChain
-langchain==0.2.1
-langchain-community==0.2.1
-langchain-openai==0.1.7
-langchain-text-splitters==0.2.0
-
-# Vector DB
-chromadb==0.5.0
-faiss-cpu>=1.7.4  # Changed from ==1.8.0 to >=1.7.4
-
-# Add other dependencies below
+# Core Framework
 streamlit
+fastapi
+uvicorn[standard]
+python-multipart
+
+# AI/ML Libraries  
+langchain
+langchain-community
+langchain-openai
+langchain-text-splitters
+openai
+
+# Vector Databases
+chromadb
+faiss-cpu
+
+# Data Processing
+pandas
+numpy
+pydantic>=2.8.0
+
+# Optional: Add other packages you need
+# pypdf
+# python-dotenv
