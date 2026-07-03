@@ -1,5 +1,3 @@
-# 🔍 Why It's Stuck & The Exact Fix
-
 import os
 import re
 import json
@@ -10,49 +8,38 @@ import threading
 import streamlit as st
 from typing import Optional
 
-# ─── Safe Initialization ──────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="Research Paper Citation Verifier", page_icon="📄", layout="wide")
 
-# Initialize session state safely
-for key, default in [("jobs", {}), ("active_job", None), ("running", False), ("initialized", False)]:
+for key, default in [("jobs", {}), ("active_job", None), ("running", False)]:
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ─── UI Always Renders First ──────────────────────────────────────────────────
 st.title("📄 Research Paper Citation Verifier")
 st.success("✅ App loaded successfully! Upload papers to begin verification.")
-st.markdown("This tool extracts citations, builds vector indexes (FAISS + Chroma), and uses RAG + LLM to verify claim accuracy.")
 
-# ─── Sidebar Config ──────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("🔑 Settings")
-    api_key = st.text_input("OpenAI API Key", type="password", help="Required for LLM verdict generation. Without it, heuristic fallback will be used.")
+    api_key = st.text_input("OpenAI API Key", type="password")
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
         st.success("API Key configured")
     else:
-        st.info("⚠️ No API key → will use keyword/semantic fallback")
+        st.info("No API key - using heuristic mode")
 
-# ─── File Uploaders ──────────────────────────────────────────────────────────
 col1, col2 = st.columns(2)
 with col1:
-    main_paper = st.file_uploader("📑 Main Paper (PDF)", type=["pdf"], key="main")
+    main_paper = st.file_uploader("📑 Main Paper", type=["pdf"], key="main")
 with col2:
-    cited_paper = st.file_uploader("📑 Cited Reference (PDF)", type=["pdf"], key="cited")
+    cited_paper = st.file_uploader("📑 Cited Paper", type=["pdf"], key="cited")
 
-# ─── Start Verification Button ───────────────────────────────────────────────
 if st.button("🚀 Start Verification", type="primary", disabled=st.session_state.running or not (main_paper and cited_paper)):
-    if not api_key:
-        st.warning("🔍 Starting with heuristic mode (no OpenAI API key). Results will be keyword-based.")
-    
     job_id = str(uuid.uuid4())
     st.session_state.active_job = job_id
     st.session_state.running = True
     
-    # Save uploads temporarily
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t1:
         t1.write(main_paper.read())
         main_path = t1.name
@@ -60,52 +47,43 @@ if st.button("🚀 Start Verification", type="primary", disabled=st.session_stat
         t2.write(cited_paper.read())
         cited_path = t2.name
         
-    # Run in background thread to keep UI responsive
-    thread = threading.Thread(target=run_verification_job, args=(job_id, main_path, cited_path))
+    thread = threading.Thread(target=lambda: run_verification_job(job_id, main_path, cited_path))
     thread.daemon = True
     thread.start()
-    st.session_state.thread = thread
 
-# ─── Progress & Results Display ──────────────────────────────────────────────
 if st.session_state.active_job and st.session_state.active_job in st.session_state.jobs:
     job = st.session_state.jobs[st.session_state.active_job]
-    
-    progress_bar = st.progress(job["progress"] / 100)
-    st.markdown(f"**Status:** ``{job['status'].upper()}`` | **Progress:** `{job['progress']}%`")
+    st.progress(job["progress"] / 100)
+    st.markdown(f"**Status:** `{job['status'].upper()}` | **Progress:** `{job['progress']}%`")
     st.caption(job["message"])
     
     if job["status"] == "done":
         st.session_state.running = False
-        st.success("✅ Verification Complete!")
+        st.success("✅ Complete!")
         
         if job.get("stats"):
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Claims Verified", job["stats"]["total_claims_verified"])
+            c1.metric("Claims", job["stats"]["total_claims_verified"])
             c2.metric("Supported", job["stats"]["supported"])
             c3.metric("Contradicted", job["stats"]["contradicted"])
             c4.metric("Integrity", job["stats"]["overall_integrity"])
             
-        st.subheader("📋 Detailed Verification Results")
+        st.subheader("📋 Results")
         for i, res in enumerate(job["results"], 1):
-            verdict_icon = "🟢" if res["verdict"]=="SUPPORTED" else "🔴" if res["verdict"]=="CONTRADICTED" else "🟡"
-            with st.expander(f"Claim {i} [{res['citation_key']}] {verdict_icon} {res['verdict']}", expanded=True):
-                st.markdown(f"**Claim:** `{res['claim'][:200]}...`")
-                st.markdown(f"**Confidence:** `{res['confidence']:.2%}` | **Similarity:** `{res['similarity_score']:.3f}`")
+            icon = "🟢" if res["verdict"]=="SUPPORTED" else "🔴" if res["verdict"]=="CONTRADICTED" else "🟡"
+            with st.expander(f"Claim {i} [{res['citation_key']}] {icon} {res['verdict']}", expanded=True):
+                st.markdown(f"**Claim:** {res['claim'][:200]}...")
+                st.markdown(f"**Confidence:** {res['confidence']:.2%} | **Similarity:** {res['similarity_score']:.3f}")
                 st.markdown(f"**Explanation:** {res['explanation']}")
                 st.markdown(f"**Evidence:** {res['evidence']}")
                 
-        with st.expander("📦 Raw JSON Output"):
-            st.json(job["results"])
-            
     elif job["status"] == "error":
         st.session_state.running = False
-        st.error(f"❌ Failed: {job.get('error', 'Unknown error')}")
+        st.error(f"❌ {job.get('error', 'Unknown error')}")
 
-# ─── Backend Logic (Lazy-Loaded) ─────────────────────────────────────────────
 def run_verification_job(job_id: str, main_path: str, cited_path: str):
-    st.session_state.jobs[job_id] = {"status": "processing", "progress": 5, "message": "Initializing backend..."}
+    st.session_state.jobs[job_id] = {"status": "processing", "progress": 5, "message": "Starting..."}
     try:
-        # Lazy imports to prevent startup hangs
         import numpy as np
         import faiss
         import chromadb
@@ -122,62 +100,50 @@ def run_verification_job(job_id: str, main_path: str, cited_path: str):
         cited_text = extract_text(cited_path)
         
         st.session_state.jobs[job_id]["progress"] = 20
-        st.session_state.jobs[job_id]["message"] = "Parsing citations..."
         citations = parse_citations(main_text)
         if not citations:
             citations = {"[ALL]": re.split(r'(?<=[.!?])\s+', main_text)[:30]}
             
         st.session_state.jobs[job_id]["progress"] = 30
-        st.session_state.jobs[job_id]["message"] = "Chunking & building indexes..."
         chunks = chunk_text(cited_text)
         
-        # Load embedder once
-        st.session_state.jobs[job_id]["message"] = "Loading embedding model..."
         embedder = load_embedder()
         embeddings = embedder.encode(chunks, show_progress_bar=False, normalize_embeddings=True)
-        dim = embeddings.shape[1]
         
-        # FAISS
-        faiss_idx = faiss.IndexFlatIP(dim)
+        faiss_idx = faiss.IndexFlatIP(embeddings.shape[1])
         faiss_idx.add(embeddings.astype('float32'))
         
-        # Chroma
         chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
-        try: chroma_client.delete_collection(f"cite_{job_id[:6]}")
-        except: pass
-        col = chroma_client.create_collection(name=f"cite_{job_id[:6]}", metadata={"hnsw:space": "cosine"})
+        try:
+            chroma_client.delete_collection(f"c{job_id[:6]}")
+        except:
+            pass
+        col = chroma_client.create_collection(name=f"c{job_id[:6]}")
         col.add(embeddings=embeddings.tolist(), documents=chunks, ids=[f"c{i}" for i in range(len(chunks))])
         
-        # LangChain Retriever
-        lc_emb = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2', model_kwargs={'device': 'cpu'})
-        lc_retriever = LangFAISS.from_texts(chunks, lc_emb).as_retriever(search_kwargs={"k": 5})
+        lc_emb = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
+        lc_ret = LangFAISS.from_texts(chunks, lc_emb).as_retriever(search_kwargs={"k": 5})
         
         st.session_state.jobs[job_id]["progress"] = 50
-        st.session_state.jobs[job_id]["message"] = "Verifying claims..."
         results = []
         items = list(citations.items())[:15]
         
         for i, (cite_key, sentences) in enumerate(items):
             claims = get_claims(sentences) or sentences[:1]
             for claim in claims[:2]:
-                # FAISS search
                 q_vec = embedder.encode([claim], show_progress_bar=False, normalize_embeddings=True).astype('float32')
                 scores, indices = faiss_idx.search(q_vec, 5)
                 faiss_chunks = [chunks[idx] for idx in indices[0] if idx < len(chunks)]
                 
-                # Chroma search
                 chroma_res = col.query(query_embeddings=embedder.encode([claim]).tolist(), n_results=3)
-                chroma_chunks = chroma_res['documents'][0]
+                all_evidence = list(dict.fromkeys(faiss_chunks + chroma_res['documents'][0]))[:4]
                 
-                all_evidence = list(dict.fromkeys(faiss_chunks + chroma_chunks))[:4]
-                
-                # LangChain cross-check
                 try:
-                    lc_docs = lc_retriever.invoke(claim)
+                    lc_docs = lc_ret.invoke(claim)
                     all_evidence = list(dict.fromkeys(all_evidence + [d.page_content for d in lc_docs]))[:4]
-                except: pass
+                except:
+                    pass
                 
-                # Verdict
                 verdict = get_verdict(claim, all_evidence, cite_key)
                 results.append({
                     "claim": claim[:400], "citation_key": cite_key,
@@ -189,20 +155,19 @@ def run_verification_job(job_id: str, main_path: str, cited_path: str):
                 })
             st.session_state.jobs[job_id]["progress"] = 50 + int((i/len(items))*40)
             
-        st.session_state.jobs[job_id]["progress"] = 95
-        st.session_state.jobs[job_id]["message"] = "Finalizing..."
         stats = compute_stats(results)
-        st.session_state.jobs[job_id].update({"status": "done", "progress": 100, "message": "Complete.", "results": results, "stats": stats})
+        st.session_state.jobs[job_id].update({"status": "done", "progress": 100, "message": "Done", "results": results, "stats": stats})
         
     except Exception as e:
-        logger.error(f"Job {job_id} failed: {e}", exc_info=True)
-        st.session_state.jobs[job_id].update({"status": "error", "progress": 0, "message": "Failed.", "error": str(e)})
+        logger.error(f"Job failed: {e}", exc_info=True)
+        st.session_state.jobs[job_id].update({"status": "error", "progress": 0, "message": "Failed", "error": str(e)})
     finally:
         for p in [main_path, cited_path]:
-            try: os.unlink(p)
-            except: pass
+            try:
+                os.unlink(p)
+            except:
+                pass
 
-# ─── Helper Functions ────────────────────────────────────────────────────────
 def extract_text(path: str) -> str:
     try:
         import pdfplumber
@@ -219,8 +184,9 @@ def parse_citations(text: str) -> dict:
     for m in re.findall(r'\[(\d+(?:[,\s-]\d+)*)\]', text):
         for k in re.split(r'[,\s-]+', m):
             k = k.strip()
-            if k: cites.setdefault(f"[{k}]", [])
-    for m in re.findall(r'\(([A-Z][a-zA-Z]+(?:\s+et\s+al\.)?(?:,\s*\d{4})?(?:;\s*[A-Z][a-zA-Z]+(?:\s+et\s+al\.)?(?:,\s*\d{4})?)*)\)', text):
+            if k:
+                cites.setdefault(f"[{k}]", [])
+    for m in re.findall(r'\(([A-Z][a-zA-Z]+(?:\s+et\s+al\.)?(?:,\s*\d{4})?)\)', text):
         cites.setdefault(f"({m})", [])
     for sent in re.split(r'(?<=[.!?])\s+', text):
         for k in list(cites.keys()):
@@ -229,17 +195,18 @@ def parse_citations(text: str) -> dict:
     return {k:v for k,v in cites.items() if v}
 
 def get_claims(sents: list) -> list:
-    kw = ['show','demonstrate','prove','find','found','report','suggest','indicate','reveal','confirm','establish','propose','argue','claim','state','conclude','achieve','improve','outperform','increase','decrease','significant','higher','lower','better','worse']
+    kw = ['show','find','found','report','suggest','indicate','confirm','propose','argue','claim','conclude','improve','increase','decrease','higher','lower','better']
     scored = [(sum(1 for w in kw if w in s.lower()), s) for s in sents if len(s)>30]
     scored.sort(reverse=True)
     return [s for _,s in scored[:3]]
 
 def chunk_text(text: str) -> list:
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=80, separators=["\n\n","\n",". "," ",""])
-    return splitter.split_text(text)
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    return RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=80).split_text(text)
 
 @st.cache_resource
 def load_embedder():
+    from sentence_transformers import SentenceTransformer
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 def get_verdict(claim: str, evidence: list, cite_key: str) -> dict:
@@ -247,82 +214,39 @@ def get_verdict(claim: str, evidence: list, cite_key: str) -> dict:
     if not api_key or not evidence:
         return heuristic_verdict(claim, evidence)
     try:
+        from openai import OpenAI
         client = OpenAI(api_key=api_key)
-        ctx = "\n\n---\n\n".join(f"[{i+1}]\n{e}" for i,e in enumerate(evidence[:3]))
+        ctx = "\n\n".join(f"[{i+1}] {e}" for i,e in enumerate(evidence[:3]))
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role":"user","content":f"Verify if this CLAIM is supported by EVIDENCE.\nCLAIM: {claim}\nEVIDENCE: {ctx}\nRespond ONLY in JSON: {{"verdict":"SUPPORTED"|"CONTRADICTED"|"INSUFFICIENT","confidence":0.0-1.0,"explanation":"...","key_evidence":"..."}}"}],
+            messages=[{"role":"user","content":f"Verify CLAIM against EVIDENCE.\nCLAIM: {claim}\nEVIDENCE: {ctx}\nRespond JSON only: {{\"verdict\":\"SUPPORTED\"|\"CONTRADICTED\"|\"INSUFFICIENT\",\"confidence\":0.0-1.0,\"explanation\":\"...\",\"key_evidence\":\"...\"}}"}],
             temperature=0.1, max_tokens=300
         )
-        raw = re.sub(r'^```json\s*|\s*```$', '', resp.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
+        raw = re.sub(r'^```json\s*|\s*```$', '', resp.choices[0].message.content.strip()).strip()
         return json.loads(raw)
     except:
         return heuristic_verdict(claim, evidence)
 
 def heuristic_verdict(claim: str, evidence: list) -> dict:
-    if not evidence: return {"verdict":"INSUFFICIENT","confidence":0.0,"explanation":"No evidence found.","key_evidence":""}
+    if not evidence:
+        return {"verdict":"INSUFFICIENT","confidence":0.0,"explanation":"No evidence","key_evidence":""}
     c_words = set(re.findall(r'\b\w{4,}\b', claim.lower()))
     best_score, best_chunk = max([(len(c_words & set(re.findall(r'\b\w{4,}\b', e.lower()))), e) for e in evidence])
     conf = min(best_score/max(len(c_words),1), 1.0)
     v = "SUPPORTED" if conf>=0.35 else "INSUFFICIENT"
-    exp = "Semantic overlap supports the claim." if v=="SUPPORTED" else "Insufficient overlap to verify."
-    return {"verdict":v,"confidence":round(conf,3),"explanation":exp,"key_evidence":best_chunk[:300]}
+    return {"verdict":v,"confidence":round(conf,3),"explanation":"Keyword overlap analysis","key_evidence":best_chunk[:300]}
 
 def compute_stats(res: list) -> dict:
-    if not res: return {}
+    if not res:
+        return {}
     t = len(res)
     s = sum(1 for r in res if r["verdict"]=="SUPPORTED")
     c = sum(1 for r in res if r["verdict"]=="CONTRADICTED")
     f = s/t
-    return {"total_claims_verified":t,"supported":s,"contradicted":c,"insufficient":t-s-c,
-            "faithfulness_score":round(f,3),"hallucination_risk":round(c/t,3),
-            "avg_confidence":round(sum(r["confidence"] for r in res)/t,3),
-            "avg_similarity_score":round(sum(r["similarity_score"] for r in res)/t,3),
-            "overall_integrity":"HIGH" if f>=0.7 else "MEDIUM" if f>=0.4 else "LOW"}
-```
-
----
-
-## 🔑 Why This Will Work
-
-| Issue in Previous Version | Fix Applied |
-|--------------------------|-------------|
-| Heavy imports (`chromadb`, `faiss`, `sentence-transformers`) ran at startup | Moved **inside** `run_verification_job` → zero startup blocking |
-| `st.session_state` could cause race conditions | Safe initialization loop + explicit defaults |
-| No immediate UI feedback | `st.success("✅ App loaded...")` renders **before** any backend code |
-| Model loading blocked thread | `@st.cache_resource` + lazy execution |
-| Threading could detach improperly | `thread.daemon = True` + proper cleanup |
-
----
-
-## 🚀 Deployment Steps
-
-1. **Replace `main.py`** in your GitHub repo with the code above
-2. **Verify `requirements.txt`** has exactly:
-   ```txt
-   streamlit
-   langchain
-   langchain-community
-   langchain-text-splitters
-   faiss-cpu
-   chromadb
-   sentence-transformers
-   pdfplumber
-   pymupdf
-   openai
-   python-dotenv
-   numpy
-   ```
-3. **Commit & push**
-4. **Refresh** your Streamlit Cloud app
-5. You should see `✅ App loaded successfully!` within **10 seconds**
-
----
-
-## 🛠️ If It Still Hangs
-
-1. Click **"Logs"** in your Streamlit Cloud app
-2. Look for `ERROR` or `WARNING` lines
-3. Reply with the **last 10 lines** of the log → I'll fix it in 1 response
-
-This version is battle-tested for Streamlit Cloud's execution model. It will load instantly and process papers in the background. Let me know once it's live! 🚀
+    return {
+        "total_claims_verified":t,"supported":s,"contradicted":c,"insufficient":t-s-c,
+        "faithfulness_score":round(f,3),"hallucination_risk":round(c/t,3),
+        "avg_confidence":round(sum(r["confidence"] for r in res)/t,3),
+        "avg_similarity_score":round(sum(r["similarity_score"] for r in res)/t,3),
+        "overall_integrity":"HIGH" if f>=0.7 else "MEDIUM" if f>=0.4 else "LOW"
+    }
