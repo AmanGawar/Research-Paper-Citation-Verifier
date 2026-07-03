@@ -1,25 +1,9 @@
-# Core Framework
 streamlit
-fastapi
-uvicorn[standard]
-python-multipart
-
-# AI/ML Libraries  
-langchain
-langchain-community
-langchain-openai
-langchain-text-splitters
-openai
-
-# Vector Databases
-chromadb
+sentence-transformers
 faiss-cpu
-
-# Data Processing
-pandas
+pdfplumber
+pymupdf
+openai
+python-dotenv
 numpy
-pydantic>=2.8.0
-
-# Optional: Add other packages you need
-# pypdf
-# python-dotenv
+pydantic>=2.8
