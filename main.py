@@ -6,6 +6,128 @@ import streamlit as st
 
 st.set_page_config(page_title="Citation Verifier", page_icon="📄", layout="wide")
 
+# ═══════════════════════════════════════════════════════════════════════════
+# HELPER FUNCTIONS (MUST BE DEFINED FIRST!)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def extract_text(uploaded_file):
+    """Extract text from uploaded PDF using pdfplumber or pymupdf."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(uploaded_file.getvalue())
+        path = tmp.name
+    
+    text = ""
+    try:
+        import pdfplumber
+        with pdfplumber.open(path) as pdf:
+            text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    except:
+        pass
+    
+    if not text:
+        try:
+            import fitz
+            text = "\n".join(p.get_text() for p in fitz.open(path))
+        except:
+            pass
+    
+    try:
+        os.unlink(path)
+    except:
+        pass
+    
+    return text
+
+
+def find_citations(text):
+    """Find citation keys like [1], [2] in text."""
+    cites = {}
+    for m in re.findall(r'\[(\d+)\]', text):
+        cites.setdefault(f"[{m}]", [])
+    
+    for sent in text.split(". "):
+        for key in cites.keys():
+            if key in sent and len(sent) > 30:
+                cites[key].append(sent)
+    
+    return {k: v for k, v in cites.items() if v}
+
+
+def chunk_text(text, size=400):
+    """Split text into overlapping chunks."""
+    words = text.split()
+    return [" ".join(words[i:i+size]) for i in range(0, len(words), size-50)]
+
+
+@st.cache_resource
+def get_model():
+    """Load sentence transformer model (cached)."""
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+
+def build_index(chunks):
+    """Build embeddings for all chunks."""
+    if not chunks:
+        return None, []
+    model = get_model()
+    embeddings = model.encode(chunks, show_progress_bar=False, normalize_embeddings=True)
+    return embeddings, chunks
+
+
+def search_evidence(query, chunks, embeddings, top_k=3):
+    """Find most similar chunks to query."""
+    if embeddings is None or len(chunks) == 0:
+        return []
+    
+    model = get_model()
+    q_emb = model.encode([query], show_progress_bar=False, normalize_embeddings=True)
+    
+    import numpy as np
+    scores = np.dot(embeddings, q_emb.T).flatten()
+    top_idx = scores.argsort()[-top_k:][::-1]
+    
+    return [chunks[i] for i in top_idx if i < len(chunks)]
+
+
+def verify(claim, evidence):
+    """Verify if evidence supports the claim."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    
+    if api_key and evidence:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            ctx = " ".join(evidence[:2])
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": f"Does this evidence support the claim?\nClaim: {claim}\nEvidence: {ctx}\nRespond with JSON: {{\"verdict\":\"SUPPORTED\" or \"INSUFFICIENT\",\"confidence\":0-1,\"evidence\":\"quote\"}}"}],
+                temperature=0,
+                max_tokens=150
+            )
+            raw = re.sub(r'```json|```', '', resp.choices[0].message.content).strip()
+            return json.loads(raw)
+        except:
+            pass
+    
+    if not evidence:
+        return {"verdict": "INSUFFICIENT", "confidence": 0.0, "evidence": ""}
+    
+    claim_words = set(claim.lower().split())
+    ev_words = set(evidence[0].lower().split())
+    overlap = len(claim_words & ev_words) / max(len(claim_words), 1)
+    
+    return {
+        "verdict": "SUPPORTED" if overlap > 0.25 else "INSUFFICIENT",
+        "confidence": overlap,
+        "evidence": evidence[0][:200]
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STREAMLIT UI (USES FUNCTIONS DEFINED ABOVE)
+# ═══════════════════════════════════════════════════════════════════════════
+
 st.title("📄 Research Paper Citation Verifier")
 st.markdown("Upload two PDFs to verify citation accuracy using FAISS vector search")
 
@@ -104,103 +226,3 @@ if st.button("🚀 Verify Citations", disabled=not (main_pdf and cited_pdf), typ
     except Exception as e:
         st.error(f"❌ Error: {str(e)}")
         st.exception(e)
-
-# Helper functions
-def extract_text(uploaded_file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(uploaded_file.getvalue())
-        path = tmp.name
-    
-    text = ""
-    try:
-        import pdfplumber
-        with pdfplumber.open(path) as pdf:
-            text = "\n".join(p.extract_text() or "" for p in pdf.pages)
-    except:
-        pass
-    
-    if not text:
-        try:
-            import fitz
-            text = "\n".join(p.get_text() for p in fitz.open(path))
-        except:
-            pass
-    
-    try:
-        os.unlink(path)
-    except:
-        pass
-    
-    return text
-
-def find_citations(text):
-    cites = {}
-    for m in re.findall(r'\[(\d+)\]', text):
-        cites.setdefault(f"[{m}]", [])
-    
-    for sent in text.split(". "):
-        for key in cites.keys():
-            if key in sent and len(sent) > 30:
-                cites[key].append(sent)
-    
-    return {k: v for k, v in cites.items() if v}
-
-def chunk_text(text, size=400):
-    words = text.split()
-    return [" ".join(words[i:i+size]) for i in range(0, len(words), size-50)]
-
-@st.cache_resource
-def get_model():
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer('all-MiniLM-L6-v2')
-
-def build_index(chunks):
-    if not chunks:
-        return None, []
-    model = get_model()
-    embeddings = model.encode(chunks, show_progress_bar=False, normalize_embeddings=True)
-    return embeddings, chunks
-
-def search_evidence(query, chunks, embeddings, top_k=3):
-    if embeddings is None or len(chunks) == 0:
-        return []
-    model = get_model()
-    q_emb = model.encode([query], show_progress_bar=False, normalize_embeddings=True)
-    
-    import numpy as np
-    scores = np.dot(embeddings, q_emb.T).flatten()
-    top_idx = scores.argsort()[-top_k:][::-1]
-    
-    return [chunks[i] for i in top_idx if i < len(chunks)]
-
-def verify(claim, evidence):
-    api_key = os.getenv("OPENAI_API_KEY")
-    
-    if api_key and evidence:
-        try:
-            from openai import OpenAI
-            client = OpenAI(api_key=api_key)
-            ctx = " ".join(evidence[:2])
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": f"Does this evidence support the claim?\nClaim: {claim}\nEvidence: {ctx}\nRespond with JSON: {{\"verdict\":\"SUPPORTED\" or \"INSUFFICIENT\",\"confidence\":0-1,\"evidence\":\"quote\"}}"}],
-                temperature=0,
-                max_tokens=150
-            )
-            raw = re.sub(r'```json|```', '', resp.choices[0].message.content).strip()
-            return json.loads(raw)
-        except:
-            pass
-    
-    if not evidence:
-        return {"verdict": "INSUFFICIENT", "confidence": 0.0, "evidence": ""}
-    
-    claim_words = set(claim.lower().split())
-    ev_words = set(evidence[0].lower().split())
-    overlap = len(claim_words & ev_words) / max(len(claim_words), 1)
-    
-    return {
-        "verdict": "SUPPORTED" if overlap > 0.25 else "INSUFFICIENT",
-        "confidence": overlap,
-        "evidence": evidence[0][:200]
-    }
